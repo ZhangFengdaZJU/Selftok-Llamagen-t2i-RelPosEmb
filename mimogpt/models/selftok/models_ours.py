@@ -21,6 +21,7 @@ from .sd3.mmdit import PatchEmbed, get_1d_sincos_pos_embed_from_grid
 from mimogpt.models.selftok.models import DiT, DiTBlock, get_2d_sincos_pos_embed, modulate, TimestepEmbedder, FinalLayer
 import torch.nn.functional as F
 from .quantizer import construct_quantizer
+from .quantizer import construct_fsq
 from .modules import DiTCrossAttnBlock, ViTBlock, QFormer, DualBlock, ConcatBlock, DiTDualBlock, DualBlockMultiRes
 from einops import rearrange
 import torch.distributed as dist
@@ -68,6 +69,15 @@ class Encoder(nn.Module):
         self.attn_mask = attn_mask
         self.single_token = single_token
 
+        self.use_fsq = quantizer_config['use_fsq']
+        # if self.use_fsq:
+        #     import math
+        #     self.n_e = math.prod(quantizer_config['levels'])
+        #     self.code_dim = len(quantizer_config['levels'])
+        # else:
+        #     self.n_e = quantizer_config['codebook_size']
+        #     self.code_dim = quantizer_config['code_dim']
+
         # models
         self.x_embedder = PatchEmbed(img_size=input_size,patch_size=patch_size, in_chans=in_channels, embed_dim=hidden_size, bias=True)
         if pos_embed_max_size is not None:
@@ -87,11 +97,20 @@ class Encoder(nn.Module):
         self.final_layer_norm2 = nn.LayerNorm(self.code_dim, eps=1e-6)
         self.final_layer_norm3 = nn.LayerNorm(encoder_hidden_size, eps=1e-6) 
 
-        self.quantizer = construct_quantizer(
-            latent_dim = encoder_out_dim,
-            output_dim = encoder_hidden_size,
-            **quantizer_config
-        )
+        if quantizer_config['use_fsq']:
+            self.quantizer = construct_fsq(
+                levels = quantizer_config['levels'],
+                dim = encoder_out_dim,
+                output_dim = encoder_hidden_size,
+                smart_re_K = quantizer_config['smart_re_K']
+            )
+        else:
+            self.quantizer = construct_quantizer(
+                latent_dim = encoder_out_dim,
+                output_dim = encoder_hidden_size,
+                **quantizer_config
+            )
+
         self.initialize_weights()
         
     def initialize_weights(self):
@@ -164,21 +183,26 @@ class Encoder(nn.Module):
         entropy_to_min = entropy_to_min
         return entropy_to_min
     
-    def get_perplexity_list(self, log_dict, chunks=50):
-        if 'perplexity_list' in log_dict:
-            # separate codebook
-            perplexity_list = torch.tensor(log_dict['perplexity_list'])
-            perplexity_list = torch.stack([t.mean(dim=0) for t in perplexity_list.tensor_split(chunks, dim=0)],dim=0).float()
-            deter_list = torch.tensor(log_dict['deter_list']).float()
-            deter_list = torch.stack([t.mean(dim=0) for t in deter_list.tensor_split(chunks, dim=0)],dim=0).float()
-            return perplexity_list.tolist(), deter_list.tolist()
+    # def get_perplexity_list(self, log_dict, chunks=50):
+    #     if 'perplexity_list' in log_dict:
+    #         # separate codebook
+    #         perplexity_list = torch.tensor(log_dict['perplexity_list'])
+    #         perplexity_list = torch.stack([t.mean(dim=0) for t in perplexity_list.tensor_split(chunks, dim=0)],dim=0).float()
+    #         deter_list = torch.tensor(log_dict['deter_list']).float()
+    #         deter_list = torch.stack([t.mean(dim=0) for t in deter_list.tensor_split(chunks, dim=0)],dim=0).float()
+    #         return perplexity_list.tolist(), deter_list.tolist()
 
-        probs = self.quantizer._codebook.timestep_p_over_c.mean(dim=0)
-        chunk_probs = torch.stack([t.mean(dim=0) for t in probs.tensor_split(chunks, dim=0)],dim=0).float()
-        ap = chunk_probs
-        perplexity_list = torch.exp(-torch.sum(ap * torch.log(ap + 1e-10), dim=1)).tolist()
-        deterministic_list = self.calc_entropy(ap).tolist()
-        return perplexity_list, deterministic_list
+    #     if not self.use_fsq:
+    #         probs = self.quantizer._codebook.timestep_p_over_c.mean(dim=0)
+    #     else:
+    #         probs = self.quantizer.timestep_p_over_c.mean(dim=0)
+            
+    #     probs = self.quantizer._codebook.timestep_p_over_c.mean(dim=0)
+    #     chunk_probs = torch.stack([t.mean(dim=0) for t in probs.tensor_split(chunks, dim=0)],dim=0).float()
+    #     ap = chunk_probs
+    #     perplexity_list = torch.exp(-torch.sum(ap * torch.log(ap + 1e-10), dim=1)).tolist()
+    #     deterministic_list = self.calc_entropy(ap).tolist()
+    #     return perplexity_list, deterministic_list
 
     def cropped_pos_embed(self, hw):
         assert self.pos_embed_max_size is not None
@@ -232,11 +256,11 @@ class Encoder(nn.Module):
                 self.forward_quantizer(self.quantizer, to_quantizer_features)
             
             # prepare logs
-            perplexity_list, deterministic_list = self.get_perplexity_list(log_dict)
-            log_dict.update({
-                "perplexity_list": perplexity_list,
-                "deter_list": deterministic_list,
-            })
+            # perplexity_list, deterministic_list = self.get_perplexity_list(log_dict)
+            # log_dict.update({
+            #     "perplexity_list": perplexity_list,
+            #     "deter_list": deterministic_list,
+            # })
 
             if self.post_norm:
                 outs_q = self.final_layer_norm3(outs_q)
