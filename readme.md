@@ -3,6 +3,7 @@
 （2）ImageNet数据集：https://huggingface.co/datasets/visual-layer/imagenet-1k-vl-enriched/tree/main/data
 # Make sure hf CLI is installed: pip install -U "huggingface_hub[cli]"
 hf download visual-layer/imagenet-1k-vl-enriched --repo-type=dataset --local-dir
+hf download simon123905/imagenet_caption_only --repo-type=dataset --local-dir /home/jovyan/zfd/imagenet_long_caption_internvl
 
 （3）tokenizer ckpt：https://huggingface.co/xiaoxiao012/E31/tree/main
 # Make sure hf CLI is installed: pip install -U "huggingface_hub[cli]"

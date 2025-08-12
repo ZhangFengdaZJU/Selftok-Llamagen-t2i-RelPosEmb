@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 import sys
-sys.path.append("/home/jovyan/zfd/LlamaGen")
+sys.path.append("./")
 
 import torch
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -155,13 +155,13 @@ def main(args):
         valid_caption_embs = caption_embs[0, :valid_len].to(torch.float32).detach().cpu().numpy()
 
         # 保存到 {out_dir}/{parquet_stem}/{image_id}.npy
-        save_dir = Path(args.out_dir) / parquet_stem
+        save_dir = Path(args.out_dir)
         save_dir.mkdir(parents=True, exist_ok=True)
         save_path = save_dir / f"{image_id}.npy"
         np.save(save_path, valid_caption_embs)
 
-        if rank == 0:
-            print(f"saved: {save_path}")
+        # if rank == 0:
+        #     print(f"saved: {save_path}")
 
     dist.destroy_process_group()
 
