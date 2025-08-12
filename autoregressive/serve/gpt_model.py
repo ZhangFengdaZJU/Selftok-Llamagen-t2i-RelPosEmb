@@ -331,7 +331,7 @@ class Transformer(nn.Module):
 #                      Rotary Positional Embedding Functions                    #
 #################################################################################
 # https://github.com/pytorch-labs/gpt-fast/blob/main/model.py 
-def precompute_freqs_cis(seq_len: int, n_elem: int, base: int = 10000, cls_token_num=120):
+def precompute_freqs_cis(seq_len: int, n_elem: int, base: int = 10000, cls_token_num=256):
     freqs = 1.0 / (base ** (torch.arange(0, n_elem, 2)[: (n_elem // 2)].float() / n_elem))
     t = torch.arange(seq_len, device=freqs.device)
     freqs = torch.outer(t, freqs) # (seq_len, head_dim // 2)
@@ -341,7 +341,7 @@ def precompute_freqs_cis(seq_len: int, n_elem: int, base: int = 10000, cls_token
     return cond_cache 
 
 
-def precompute_freqs_cis_2d(grid_size: int, n_elem: int, base: int = 10000, cls_token_num=120):
+def precompute_freqs_cis_2d(grid_size: int, n_elem: int, base: int = 10000, cls_token_num=256):
     # split the dimension into half, one for x and one for y
     half_dim = n_elem // 2
     freqs = 1.0 / (base ** (torch.arange(0, half_dim, 2)[: (half_dim // 2)].float() / half_dim))

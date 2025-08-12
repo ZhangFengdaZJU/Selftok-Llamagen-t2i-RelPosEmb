@@ -90,7 +90,7 @@ class CaptionEmbedder(nn.Module):
     """
     Embeds text caption into vector representations. Also handles label dropout for classifier-free guidance.
     """
-    def __init__(self, in_channels, hidden_size, uncond_prob, token_num=256):
+    def __init__(self, in_channels, hidden_size, uncond_prob, token_num=120):
         super().__init__()
         self.cap_proj = MLP(in_features=in_channels, hidden_features=hidden_size, out_features=hidden_size)
         self.register_buffer("uncond_embedding", nn.Parameter(torch.randn(token_num, in_channels) / in_channels ** 0.5))
@@ -287,9 +287,9 @@ class Transformer(nn.Module):
         self.output = nn.Linear(config.dim, config.vocab_size, bias=False)
 
         # 2d rotary pos embedding
-        # grid_size = int(self.block_size ** 0.5)
-        # assert grid_size * grid_size == self.block_size
-        self.freqs_cis = precompute_freqs_cis(self.block_size, self.config.dim // self.config.n_head, self.config.rope_base, self.cls_token_num)
+        grid_size = int(self.block_size ** 0.5)
+        assert grid_size * grid_size == self.block_size
+        self.freqs_cis = precompute_freqs_cis_2d(grid_size, self.config.dim // self.config.n_head, self.config.rope_base, self.cls_token_num)
         
         # KVCache
         self.max_batch_size = -1
@@ -325,9 +325,9 @@ class Transformer(nn.Module):
 
         causal_mask = torch.tril(torch.ones(self.max_seq_length, self.max_seq_length, dtype=torch.bool))
         self.causal_mask = causal_mask.unsqueeze(0).repeat(self.max_batch_size, 1, 1)
-        # grid_size = int(self.config.block_size ** 0.5)
-        # assert grid_size * grid_size == self.block_size
-        self.freqs_cis = precompute_freqs_cis(self.block_size, self.config.dim // self.config.n_head, self.config.rope_base, self.cls_token_num)
+        grid_size = int(self.config.block_size ** 0.5)
+        assert grid_size * grid_size == self.block_size
+        self.freqs_cis = precompute_freqs_cis_2d(grid_size, self.config.dim // self.config.n_head, self.config.rope_base, self.cls_token_num)
 
     def forward(
         self, 
@@ -391,7 +391,7 @@ class Transformer(nn.Module):
 #                      Rotary Positional Embedding Functions                    #
 #################################################################################
 # https://github.com/pytorch-labs/gpt-fast/blob/main/model.py 
-def precompute_freqs_cis(seq_len: int, n_elem: int, base: int = 10000, cls_token_num=256):
+def precompute_freqs_cis(seq_len: int, n_elem: int, base: int = 10000, cls_token_num=120):
     freqs = 1.0 / (base ** (torch.arange(0, n_elem, 2)[: (n_elem // 2)].float() / n_elem))
     t = torch.arange(seq_len, device=freqs.device)
     freqs = torch.outer(t, freqs) # (seq_len, head_dim // 2)
@@ -401,7 +401,7 @@ def precompute_freqs_cis(seq_len: int, n_elem: int, base: int = 10000, cls_token
     return cond_cache 
 
 
-def precompute_freqs_cis_2d(grid_size: int, n_elem: int, base: int = 10000, cls_token_num=256):
+def precompute_freqs_cis_2d(grid_size: int, n_elem: int, base: int = 10000, cls_token_num=120):
     # split the dimension into half, one for x and one for y
     half_dim = n_elem // 2
     freqs = 1.0 / (base ** (torch.arange(0, half_dim, 2)[: (half_dim // 2)].float() / half_dim))

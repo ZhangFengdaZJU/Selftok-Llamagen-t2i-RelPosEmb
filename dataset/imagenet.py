@@ -53,9 +53,10 @@ class CustomDataset(Dataset):
 def build_imagenet(args, transform):
     return ImageFolder(args.data_path, transform=transform)
 
+
 def build_imagenet_code(args):
-    feature_dir = f"{args.code_path}/imagenet{args.image_size}_codes"
-    label_dir = f"{args.code_path}/imagenet{args.image_size}_labels"
+    image_token_path = args.image_token_path
+    text_token_path = args.text_token_path
     assert os.path.exists(feature_dir) and os.path.exists(label_dir), \
         f"please first run: bash scripts/autoregressive/extract_codes_c2i.sh ..."
-    return CustomDataset(feature_dir, label_dir)
+    return CustomDataset(image_token_path, text_token_path)

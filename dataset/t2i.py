@@ -6,6 +6,7 @@ import torch
 from torch.utils.data import Dataset
 from PIL import Image 
 
+from pathlib import Path
 
 class Text2ImgDatasetImg(Dataset):
     def __init__(self, lst_dir, face_lst_dir, transform):
@@ -78,7 +79,7 @@ class Text2ImgDataset(Dataset):
         self.image_size = args.image_size
         latent_size = args.image_size // args.downsample_size
         self.code_len = latent_size ** 2
-        self.t5_feature_max_len = 120
+        self.t5_feature_max_len = 256
         self.t5_feature_dim = 2048
         self.max_seq_length = self.t5_feature_max_len + self.code_len
 
@@ -137,8 +138,46 @@ class Text2ImgDataset(Dataset):
 
 class Text2ImgDatasetCode(Dataset):
     def __init__(self, args):
-        pass
+        p_image = Path(args.image_token_path)
+        image_names = [f.name for f in p_image.iterdir() if f.is_file()]
+        self.token_names = sorted(image_names)
+        self.root_path_image = args.image_token_path
+        self.root_path_text = args.text_token_path
+        
+        self.image_size = args.image_size
+        self.code_len = 1536
+        self.t5_feature_max_len = 256
+        self.t5_feature_dim = 2048
+        self.max_seq_length = self.t5_feature_max_len + self.code_len
 
+    def __len__(self):
+        return len(self.token_names)
+
+    def __getitem__(self, index):
+        image_token_path = self.root_path_image + "/" + self.token_names[index]
+        image_token_numpy = np.load(image_token_path)
+        image_token = torch.from_numpy(image_token_numpy)
+
+        text_token_path = self.root_path_text + "/" + self.token_names[index]
+        text_token_numpy = np.load(text_token_path)
+        text_token = torch.from_numpy(text_token_numpy).unsqueeze(0)
+
+        text_token_padding = torch.zeros((1, self.t5_feature_max_len, self.t5_feature_dim))
+
+        text_token_len = text_token.shape[1]
+        text_token_len = min(self.t5_feature_max_len, text_token_len)
+        text_token_padding[:, -text_token_len:] = text_token[:, :text_token_len]
+        emb_mask = torch.zeros((self.t5_feature_max_len,))
+        emb_mask[-text_token_len:] = 1
+        attn_mask = torch.tril(torch.ones(self.max_seq_length, self.max_seq_length))
+        T = self.t5_feature_max_len
+        attn_mask[:, :T] = attn_mask[:, :T] * emb_mask.unsqueeze(0)
+        eye_matrix = torch.eye(self.max_seq_length, self.max_seq_length)
+        attn_mask = attn_mask * (1 - eye_matrix) + eye_matrix
+        attn_mask = attn_mask.unsqueeze(0).to(torch.bool)
+        valid = 1
+
+        return image_token, text_token_padding, attn_mask, torch.tensor(valid)
 
 
 

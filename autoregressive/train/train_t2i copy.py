@@ -1,10 +1,6 @@
 # Modified from:
 #   fast-DiT: https://github.com/chuanyangjin/fast-DiT
 #   nanoGPT: https://github.com/karpathy/nanoGPT
-
-import sys
-sys.path.append("./")
-
 import torch
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -12,10 +8,9 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
+from torchvision import transforms
 from glob import glob
-from copy import deepcopy
 import time
-import inspect
 import argparse
 import os
 
@@ -25,8 +20,9 @@ from dataset.build import build_dataset
 from dataset.augmentation import center_crop_arr
 from autoregressive.train.train_c2i import creat_optimizer
 from autoregressive.models.gpt import GPT_models
+from tokenizer.tokenizer_image.vq_model import VQ_models
 
-import wandb
+
 
 def main(args):
     assert torch.cuda.is_available(), "Training currently requires at least one GPU."
@@ -66,14 +62,6 @@ def main(args):
     # training env
     logger.info(f"Starting rank={rank}, seed={seed}, world_size={dist.get_world_size()}.")
 
-    # wandb
-    if not args.no_wandb and rank==0:
-        os.environ["WANDB_DIR"] = experiment_dir  
-        wandb.init(
-            project=args.wandb_project, 
-            name = f"{time_record}-{model_string_name}-E31-t2i",
-            config=vars(args)
-        )
 
     # Setup model
     # latent_size = args.image_size // args.downsample_size
@@ -92,7 +80,22 @@ def main(args):
     # Setup optimizer
     optimizer = creat_optimizer(model, args.weight_decay, args.lr, (args.beta1, args.beta2), logger)
 
-    dataset = build_dataset(args)
+    # Setup data:
+    if args.dataset == 't2i':     # create and load model
+        vq_model = VQ_models[args.vq_model](
+            codebook_size=args.codebook_size,
+            codebook_embed_dim=args.codebook_embed_dim)
+        vq_model.to(device)
+        vq_model.eval()
+        checkpoint = torch.load(args.vq_ckpt, map_location="cpu")
+        vq_model.load_state_dict(checkpoint["model"])
+        del checkpoint        
+    transform = transforms.Compose([
+        transforms.Lambda(lambda pil_image: center_crop_arr(pil_image, args.image_size)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True)
+    ])
+    dataset = build_dataset(args, transform=transform)
     sampler = DistributedSampler(
         dataset,
         num_replicas=dist.get_world_size(),
@@ -148,9 +151,12 @@ def main(args):
         for x, y, attn_mask, valid in loader:
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)
+            if args.dataset == 't2i':
+                img = x
+                with torch.no_grad():
+                    _, _, [_, _, indices] = vq_model.encode(img)
+                x = indices.reshape(img.shape[0], -1)
             z_indices = x.reshape(x.shape[0], -1)
-            # flip for reverse order
-            z_indices = torch.flip(z_indices, dims=[1])
             c_indices = y.reshape(y.shape[0], y.shape[-2], y.shape[-1])
             assert z_indices.shape[0] == c_indices.shape[0]
             attn_mask = attn_mask.reshape(attn_mask.shape[0], 1, attn_mask.shape[-2], attn_mask.shape[-1]) # (bs, n_head, seq_len, seq_len)
@@ -181,10 +187,6 @@ def main(args):
                 dist.all_reduce(avg_loss, op=dist.ReduceOp.SUM)
                 avg_loss = avg_loss.item() / dist.get_world_size()
                 logger.info(f"(step={train_steps:07d}) Train Loss: {avg_loss:.4f}, Train Steps/Sec: {steps_per_sec:.2f}")
-
-                if not args.no_wandb and rank==0:
-                    wandb.log({"train_loss": avg_loss}, step=train_steps)
-
                 # Reset monitoring variables:
                 running_loss = 0
                 log_steps = 0
@@ -223,18 +225,20 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--image-token-path", type=str, required=True)
-    parser.add_argument("--text-token-path", type=str, required=True)
+    parser.add_argument("--data-path", type=str, required=True)
+    parser.add_argument("--t5-feat-path", type=str, required=True)
     parser.add_argument("--short-t5-feat-path", type=str, default=None, help="short caption of t5_feat_path")
     parser.add_argument("--cloud-save-path", type=str, required=True, help='please specify a cloud disk path, if not, local path')
     parser.add_argument("--no-local-save", action='store_true', help='no save checkpoints to local path for limited disk volume')
+    parser.add_argument("--vq-model", type=str, choices=list(VQ_models.keys()), default="VQ-16")
+    parser.add_argument("--vq-ckpt", type=str, default=None, help="ckpt path for vq model")
     parser.add_argument("--codebook-size", type=int, default=16384, help="codebook size for vector quantization")
     parser.add_argument("--codebook-embed-dim", type=int, default=8, help="codebook dimension for vector quantization")
     parser.add_argument("--gpt-model", type=str, choices=list(GPT_models.keys()), default="GPT-B")
     parser.add_argument("--gpt-ckpt", type=str, default=None, help="ckpt path for resume training")
     parser.add_argument("--gpt-type", type=str, choices=['c2i', 't2i'], default="t2i")
     parser.add_argument("--vocab-size", type=int, default=16384, help="vocabulary size of visual tokenizer")
-    parser.add_argument("--cls-token-num", type=int, default=256, help="max token number of condition input")
+    parser.add_argument("--cls-token-num", type=int, default=120, help="max token number of condition input")
     parser.add_argument("--dropout-p", type=float, default=0.1, help="dropout_p of resid_dropout_p and ffn_dropout_p")
     parser.add_argument("--token-dropout-p", type=float, default=0.1, help="dropout_p of token_dropout_p")
     parser.add_argument("--drop-path", type=float, default=0.0, help="drop_path_rate of attention and ffn")
@@ -257,7 +261,5 @@ if __name__ == "__main__":
     parser.add_argument("--ckpt-every", type=int, default=5000)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
     parser.add_argument("--mixed-precision", type=str, default='bf16', choices=["none", "fp16", "bf16"]) 
-    parser.add_argument("--wandb-project", type=str, default='c2i_selftok')
-    parser.add_argument("--no-wandb", action='store_true')
     args = parser.parse_args()
     main(args)
